@@ -314,7 +314,7 @@ export function describeAction(action: Action, state: GameState): string {
       return `P${pid}: Secondary Trade`;
     case ActionType.PLAY_STRATEGY: {
       const idx = action.sourceIndex;
-      const player = state.getPlayer(pid);
+      const player = state.getPlayer(state.currentPlayer);
       if (idx >= 0 && idx < player.strategyHand.length) {
         const cardId = player.strategyHand[idx];
         const sdef = registry.getStrategy(cardId);

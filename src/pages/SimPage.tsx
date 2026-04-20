@@ -1,11 +1,14 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router';
 import { ArrowLeft, Loader2, Play, Download, RotateCcw } from 'lucide-react';
 import { useGameState } from '../game/useGameState';
 import { getRegistry } from '../engine/cardRegistry';
 import { GameBoard } from '../components/GameBoard';
+import { OpponentPicker } from '../components/OpponentPicker';
+import type { SeatConfig } from '../game/seat';
 
 const MODEL_PATH = '/models/ai_model.onnx';
+const DEFAULT_AI_SEAT: SeatConfig = { kind: 'utilityBt', persona: 'balanced' };
 
 export default function SimPage() {
   const navigate = useNavigate();
@@ -14,17 +17,27 @@ export default function SimPage() {
   // Setup state
   const [numPlayers, setNumPlayers] = useState(2);
   const [seed, setSeed] = useState<string>('');
+  const [seats, setSeats] = useState<SeatConfig[]>([DEFAULT_AI_SEAT, DEFAULT_AI_SEAT]);
   const [hasStarted, setHasStarted] = useState(false);
+
+  // Keep seats array length in sync with numPlayers, preserving existing choices.
+  useEffect(() => {
+    setSeats((prev) => {
+      if (prev.length === numPlayers) return prev;
+      if (prev.length > numPlayers) return prev.slice(0, numPlayers);
+      return [...prev, ...Array(numPlayers - prev.length).fill(DEFAULT_AI_SEAT)];
+    });
+  }, [numPlayers]);
 
   const handleStart = useCallback(async () => {
     const seedVal = seed ? parseInt(seed, 10) : Math.floor(Math.random() * 999999);
     const registry = await getRegistry();
     await game.startSimulation(
-      { numPlayers, seed: seedVal, modelPath: MODEL_PATH },
+      { numPlayers, seed: seedVal, seats },
       registry,
     );
     setHasStarted(true);
-  }, [seed, numPlayers, game]);
+  }, [seed, numPlayers, seats, game]);
 
   const handleSaveReplay = useCallback(() => {
     if (game.frames.length === 0) return;
@@ -72,6 +85,25 @@ export default function SimPage() {
                 </button>
               ))}
             </div>
+          </div>
+
+          {/* Opponents */}
+          <div className="mb-6 space-y-2">
+            <label className="block text-sm font-medium text-gray-400">
+              Opponents
+            </label>
+            {seats.map((seat, i) => (
+              <OpponentPicker
+                key={i}
+                seatIndex={i}
+                value={seat}
+                modelPath={MODEL_PATH}
+                onChange={(next) =>
+                  setSeats((prev) => prev.map((p, j) => (j === i ? next : p)))
+                }
+                label={`Seat ${i + 1}`}
+              />
+            ))}
           </div>
 
           {/* Seed */}

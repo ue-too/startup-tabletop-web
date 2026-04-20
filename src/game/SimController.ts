@@ -1,11 +1,11 @@
 /**
  * SimController: orchestrates an all-AI simulation game.
- * No human player -- all agents use ONNX inference.
+ * No human player -- all agents come from per-seat config.
  */
 
 import { GameEngine } from "../engine/engine";
 import type { CardRegistry } from "../engine/cardRegistry";
-import { OnnxAgent } from "../ai/onnxAgent";
+import type { Agent, AgentContext } from "../ai/agent";
 import { encodeObservation } from "../ai/observation";
 import { ActionEncoder } from "../ai/actionEncoder";
 import {
@@ -13,56 +13,62 @@ import {
   describeAction,
   type GameFrame,
 } from "./GameRecorder";
+import {
+  buildAgentsForSeats,
+  seatsNeedNeuralFeatures,
+  type SeatConfig,
+} from "./seat";
 
 export interface SimControllerOptions {
   numPlayers: number;
   seed: number;
-  modelPath: string;
+  /** Per-seat agent config; must be length === numPlayers and contain no human seats. */
+  seats: SeatConfig[];
 }
 
 export class SimController {
   private engine: GameEngine;
-  private agents: OnnxAgent[];
+  private agents: (Agent | null)[];
   private actionEncoder: ActionEncoder;
-  private modelPath: string;
-  private numPlayers: number;
-  private seed: number;
+  private needsObs: boolean;
 
   recorder: GameRecorder;
 
   constructor(options: SimControllerOptions, registry: CardRegistry) {
-    this.numPlayers = options.numPlayers;
-    this.seed = options.seed;
-    this.modelPath = options.modelPath;
+    if (options.seats.length !== options.numPlayers) {
+      throw new Error(
+        `seats.length (${options.seats.length}) must equal numPlayers (${options.numPlayers})`,
+      );
+    }
+    if (options.seats.some((s) => s.kind === "human")) {
+      throw new Error("SimController does not support human seats");
+    }
+    this.needsObs = seatsNeedNeuralFeatures(options.seats);
 
     this.engine = new GameEngine(options.numPlayers, options.seed, registry);
     this.actionEncoder = new ActionEncoder();
     this.recorder = new GameRecorder();
 
-    // One OnnxAgent per player (all AI)
-    this.agents = [];
-    for (let i = 0; i < options.numPlayers; i++) {
-      this.agents.push(new OnnxAgent());
-    }
+    this.agents = buildAgentsForSeats(options.seats, options.seed);
 
     // Record initial frame
     this.recorder.recordInitialFrame(this.engine.state, options.seed, options.numPlayers);
   }
 
   /**
-   * Load the ONNX model for all agents.
+   * Initialize any agents that need async setup, deduping across seats.
    */
   async init(): Promise<void> {
-    // Load once and share -- OnnxAgent instances each hold a session,
-    // but we load the same model path for all of them.
+    const seen = new Set<Agent>();
     for (const agent of this.agents) {
-      await agent.load(this.modelPath);
+      if (!agent || seen.has(agent) || !agent.init) continue;
+      seen.add(agent);
+      await agent.init();
     }
   }
 
   /**
    * Step one action: the current agent picks and executes an action.
-   * Returns the recorded GameFrame.
    */
   async stepOne(): Promise<GameFrame> {
     if (this.engine.isDone()) {
@@ -73,14 +79,28 @@ export class SimController {
     const currentPlayer = this.engine.getCurrentAgent();
     const legalActions = this.engine.getLegalActions();
 
-    // Encode observation and mask
-    const obs = encodeObservation(state, currentPlayer);
     this.actionEncoder.update(legalActions);
-    const mask = this.actionEncoder.encodeMask();
+    const ctx: AgentContext = {
+      state,
+      player: currentPlayer,
+      legalActions,
+    };
+    if (this.needsObs) {
+      ctx.observation = encodeObservation(state, currentPlayer);
+      ctx.actionMask = this.actionEncoder.encodeMask();
+    }
 
     const agent = this.agents[currentPlayer];
-    const actionIdx = await agent.getAction(obs, mask);
-    const action = this.actionEncoder.decode(actionIdx);
+    if (!agent) {
+      throw new Error(`No agent for seat ${currentPlayer}`);
+    }
+    const actionIdx = await agent.getAction(ctx);
+    const action = legalActions[actionIdx];
+    if (!action) {
+      throw new Error(
+        `Agent for seat ${currentPlayer} returned invalid index ${actionIdx}`,
+      );
+    }
 
     const actionDesc = describeAction(action, state);
     const stepResult = this.engine.step(action);
@@ -94,7 +114,6 @@ export class SimController {
 
   /**
    * Run N steps (or until game over, whichever comes first).
-   * Returns all frames generated.
    */
   async stepN(n: number): Promise<GameFrame[]> {
     const frames: GameFrame[] = [];
@@ -108,7 +127,6 @@ export class SimController {
 
   /**
    * Run the simulation to completion (max 10000 steps as safety limit).
-   * Returns all frames generated.
    */
   async runToEnd(): Promise<GameFrame[]> {
     const MAX_STEPS = 10000;
@@ -134,5 +152,9 @@ export class SimController {
 
   getSnapshot(): GameFrame {
     return GameRecorder.snapshotFrame(this.engine.state);
+  }
+
+  getScores(): number[] {
+    return this.engine.getScores();
   }
 }

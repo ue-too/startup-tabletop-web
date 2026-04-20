@@ -1,9 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router';
-import { ArrowLeft, Loader2 } from 'lucide-react';
+import { ArrowLeft, Loader2, Play } from 'lucide-react';
 import { useGameState } from '../game/useGameState';
 import { getRegistry } from '../engine/cardRegistry';
 import { GameBoard } from '../components/GameBoard';
+import { OpponentPicker } from '../components/OpponentPicker';
+import type { SeatConfig } from '../game/seat';
 
 const MODEL_PATH = '/models/ai_model.onnx';
 
@@ -11,34 +13,81 @@ export default function GamePage() {
   const navigate = useNavigate();
   const game = useGameState();
   const [seed, setSeed] = useState<string>('');
+  const [opponent, setOpponent] = useState<SeatConfig>({
+    kind: 'utilityBt',
+    persona: 'balanced',
+  });
   const [started, setStarted] = useState(false);
 
   const handleStart = useCallback(async () => {
     const seedVal = seed ? parseInt(seed, 10) : Math.floor(Math.random() * 999999);
     const registry = await getRegistry();
+    const seats: SeatConfig[] = [{ kind: 'human' }, opponent];
     await game.startGame(
-      { numPlayers: 2, seed: seedVal, humanPlayer: 0, modelPath: MODEL_PATH },
+      { numPlayers: seats.length, seed: seedVal, seats },
       registry,
     );
     setStarted(true);
-  }, [seed, game]);
-
-  // Start on mount with default settings
-  useEffect(() => {
-    if (!started) {
-      handleStart();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [seed, opponent, game]);
 
   const isGameOver = game.currentFrame?.scores != null && game.currentFrame.scores.length > 0;
+
+  // Setup screen (before start)
+  if (!started && !game.isLoading) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center px-4">
+        <div className="w-full max-w-md rounded-2xl border border-gray-800 bg-gray-900/90 p-8 shadow-2xl">
+          <h2 className="mb-6 text-center text-2xl font-bold text-white">Play vs AI</h2>
+
+          <div className="mb-5">
+            <OpponentPicker
+              seatIndex={1}
+              value={opponent}
+              modelPath={MODEL_PATH}
+              onChange={setOpponent}
+              label="Opponent"
+            />
+          </div>
+
+          <div className="mb-8">
+            <label className="mb-2 block text-sm font-medium text-gray-400">
+              Seed <span className="text-gray-600">(optional)</span>
+            </label>
+            <input
+              type="number"
+              value={seed}
+              onChange={(e) => setSeed(e.target.value)}
+              placeholder="Random"
+              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-4 py-2.5 text-sm text-white placeholder-gray-500 outline-none transition-colors focus:border-cyan-500"
+            />
+          </div>
+
+          <div className="flex gap-3">
+            <button
+              onClick={() => navigate('/')}
+              className="rounded-lg bg-gray-800 px-4 py-2.5 text-sm font-medium text-gray-400 transition-colors hover:bg-gray-700 hover:text-white"
+            >
+              Back
+            </button>
+            <button
+              onClick={handleStart}
+              className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-cyan-600 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-cyan-500"
+            >
+              <Play size={16} />
+              Start Game
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // Loading state
   if (game.isLoading || (!game.currentFrame && !game.error)) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-4">
         <Loader2 className="h-10 w-10 animate-spin text-cyan-400" />
-        <p className="text-sm text-gray-400">Loading ONNX model & initializing game...</p>
+        <p className="text-sm text-gray-400">Initializing game...</p>
       </div>
     );
   }
@@ -121,7 +170,7 @@ export default function GamePage() {
               <button
                 onClick={() => {
                   setStarted(false);
-                  handleStart();
+                  game.returnToMenu();
                 }}
                 className="flex-1 rounded-lg bg-cyan-600 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-cyan-500"
               >
