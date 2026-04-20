@@ -1,12 +1,15 @@
 /**
  * GameController: orchestrates a human vs AI game.
  * Human plays as one player; AI agents handle the rest.
+ *
+ * Agents are resolved from a per-seat config (see src/game/seat.ts), so a
+ * game can mix ONNX, UtilityBT, and (future) other agent types.
  */
 
 import { GameEngine, type StepResult } from "../engine/engine";
 import type { CardRegistry } from "../engine/cardRegistry";
 import type { Action } from "../engine/actions/base";
-import { OnnxAgent } from "../ai/onnxAgent";
+import type { Agent, AgentContext } from "../ai/agent";
 import { encodeObservation } from "../ai/observation";
 import { ActionEncoder } from "../ai/actionEncoder";
 import {
@@ -14,55 +17,65 @@ import {
   describeAction,
   type GameFrame,
 } from "./GameRecorder";
+import {
+  buildAgentsForSeats,
+  findHumanSeat,
+  seatsNeedNeuralFeatures,
+  type SeatConfig,
+} from "./seat";
 
 export type GameMode = "play" | "simulate" | "replay";
 
 export interface GameControllerOptions {
   numPlayers: number;
   seed: number;
-  humanPlayer: number; // which player index is human (0-based)
-  modelPath: string;
+  /** Per-seat agent configuration; must have length === numPlayers. */
+  seats: SeatConfig[];
 }
 
 export class GameController {
   private engine: GameEngine;
-  private agents: OnnxAgent[];
+  /** agents[i] is null for the human seat, else the Agent instance. */
+  private agents: (Agent | null)[];
   private actionEncoder: ActionEncoder;
   private humanPlayer: number;
-  private modelPath: string;
-  private numPlayers: number;
-  private seed: number;
+  private needsObs: boolean;
 
   recorder: GameRecorder;
 
   constructor(options: GameControllerOptions, registry: CardRegistry) {
-    this.numPlayers = options.numPlayers;
-    this.seed = options.seed;
-    this.humanPlayer = options.humanPlayer;
-    this.modelPath = options.modelPath;
+    if (options.seats.length !== options.numPlayers) {
+      throw new Error(
+        `seats.length (${options.seats.length}) must equal numPlayers (${options.numPlayers})`,
+      );
+    }
+    const humanSeat = findHumanSeat(options.seats);
+    if (humanSeat < 0) {
+      throw new Error("GameController requires exactly one human seat");
+    }
+    this.humanPlayer = humanSeat;
+    this.needsObs = seatsNeedNeuralFeatures(options.seats);
 
     this.engine = new GameEngine(options.numPlayers, options.seed, registry);
     this.actionEncoder = new ActionEncoder();
     this.recorder = new GameRecorder();
 
-    // Create one OnnxAgent per AI player (share the same model)
-    this.agents = [];
-    for (let i = 0; i < options.numPlayers; i++) {
-      if (i !== options.humanPlayer) {
-        this.agents.push(new OnnxAgent());
-      }
-    }
+    this.agents = buildAgentsForSeats(options.seats, options.seed);
 
     // Record initial frame
     this.recorder.recordInitialFrame(this.engine.state, options.seed, options.numPlayers);
   }
 
   /**
-   * Load the ONNX model for all AI agents.
+   * Initialize any agents that need async setup (e.g. loading ONNX models).
+   * Deduplicates identical ONNX adapters so the model is fetched at most once.
    */
   async init(): Promise<void> {
+    const seen = new Set<Agent>();
     for (const agent of this.agents) {
-      await agent.load(this.modelPath);
+      if (!agent || seen.has(agent) || !agent.init) continue;
+      seen.add(agent);
+      await agent.init();
     }
   }
 
@@ -141,17 +154,29 @@ export class GameController {
     const state = this.engine.state;
     const legalActions = this.engine.getLegalActions();
 
-    // Encode observation and action mask
-    const obs = encodeObservation(state, playerId);
     this.actionEncoder.update(legalActions);
-    const mask = this.actionEncoder.encodeMask();
+    const ctx: AgentContext = {
+      state,
+      player: playerId,
+      legalActions,
+    };
+    if (this.needsObs) {
+      ctx.observation = encodeObservation(state, playerId);
+      ctx.actionMask = this.actionEncoder.encodeMask();
+    }
 
-    // Find the agent for this player (agents array skips human)
-    const agentIndex = playerId < this.humanPlayer ? playerId : playerId - 1;
-    const agent = this.agents[agentIndex];
+    const agent = this.agents[playerId];
+    if (!agent) {
+      throw new Error(`No agent for non-human seat ${playerId}`);
+    }
 
-    const actionIdx = await agent.getAction(obs, mask);
-    const action = this.actionEncoder.decode(actionIdx);
+    const actionIdx = await agent.getAction(ctx);
+    const action = legalActions[actionIdx];
+    if (!action) {
+      throw new Error(
+        `Agent for seat ${playerId} returned invalid index ${actionIdx}`,
+      );
+    }
 
     const actionDesc = describeAction(action, state);
     const stepResult = this.engine.step(action);
